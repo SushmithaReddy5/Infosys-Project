@@ -1,91 +1,82 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.staticfiles import StaticFiles
 import uvicorn
+from datetime import datetime
 
-# ---------------------------------------
-# 1. Create FastAPI App
-# ---------------------------------------
 app = FastAPI()
 
+connections = {}
+usernames = {}
 
-# ---------------------------------------
-# 2. Store Active Connections
-# ---------------------------------------
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: dict[WebSocket, str] = {}
-
-    async def connect(self, websocket: WebSocket, username: str):
-        await websocket.accept()
-        self.active_connections[websocket] = username
-
-    def disconnect(self, websocket: WebSocket):
-        if websocket in self.active_connections:
-            del self.active_connections[websocket]
-
-    async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            await connection.send_text(message)
-
-    def get_usernames(self):
-        return list(self.active_connections.values())
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-manager = ConnectionManager()
-
-
-# ---------------------------------------
-# 3. Root API
-# ---------------------------------------
 @app.get("/")
 async def root():
-    return {"message": "Chatterbox Milestone 2 - Group Chat Server Running"}
+    return {"message": "Chatterbox Server Running"}
 
 
-# ---------------------------------------
-# 4. WebSocket Endpoint
-# ---------------------------------------
+async def broadcast(data):
+    for connection in connections:
+        await connection.send_json(data)
+
+
 @app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
+async def websocket_endpoint(ws: WebSocket):
 
-    # Ask for username
-    await websocket.accept()
-    await websocket.send_text("Enter your username:")
-
-    username = await websocket.receive_text()
-
-    # Add user
-    await manager.connect(websocket, username)
-
-    # Notify all
-    await manager.broadcast(f" {username} joined the chat")
-
-    print(f"{username} connected")
+    await ws.accept()
 
     try:
+        data = await ws.receive_json()
+
+        username = data.get("username", "Anonymous")
+
+        connections[ws] = ws
+        usernames[ws] = username
+
+        await broadcast({
+            "type": "system",
+            "message": f"{username} joined the chat 👋"
+        })
+
         while True:
 
-            message = await websocket.receive_text()
+            data = await ws.receive_json()
 
-            # Special command: show users
-            if message.lower() == "/users":
-                users = ", ".join(manager.get_usernames())
-                await websocket.send_text(f"Online users: {users}")
-            else:
-                # Broadcast normal message
-                await manager.broadcast(f"{username}: {message}")
+            if data["type"] == "chat":
+
+                await broadcast({
+                    "type": "chat",
+                    "username": username,
+                    "message": data["message"],
+                    "time": datetime.now().strftime("%H:%M")
+                })
+
+            if data["type"] == "typing":
+
+                await broadcast({
+                    "type": "typing",
+                    "username": username
+                })
+
+            if data["type"] == "stop_typing":
+
+                await broadcast({
+                    "type": "stop_typing"
+                })
 
     except WebSocketDisconnect:
 
-        manager.disconnect(websocket)
+        user = usernames.get(ws, "Someone")
 
-        # Notify all
-        await manager.broadcast(f" {username} left the chat")
+        connections.pop(ws, None)
+        usernames.pop(ws, None)
 
-        print(f"{username} disconnected")
+        await broadcast({
+            "type": "system",
+            "message": f"{user} left the chat ❌"
+        })
 
 
-# ---------------------------------------
-# 5. Run Server
-# ---------------------------------------
 if __name__ == "__main__":
     uvicorn.run("main:app", host="localhost", port=8000, reload=True)
